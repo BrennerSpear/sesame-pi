@@ -1,0 +1,7 @@
+websockets>=11.0.3
+pyaudio>=0.2.13
+gpiozero>=2.0; platform_system != "Darwin"
+pynput>=1.7.6; platform_system == "Darwin"
+numpy>=1.24.0
+python-dotenv>=1.0.0
+PyJWT>=2.8.0
