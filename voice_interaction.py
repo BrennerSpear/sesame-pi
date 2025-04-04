@@ -277,6 +277,27 @@ class VoiceInteractionSession:
     async def handle_ping_response(self, message):
         """Handle ping response message"""
         logging.info('Received ping response')
+        
+    async def handle_chat(self, message):
+        """Handle chat message"""
+        logging.info(f'Chat message received:')
+        logging.info(f'  Session ID: {message.session_id}')
+        logging.info(f'  Call ID: {message.call_id}')
+        if message.request_id:
+            logging.info(f'  Request ID: {message.request_id}')
+        
+        # Log the chat content in a readable format
+        if isinstance(message.content, dict):
+            logging.info('  Content:')
+            for key, value in message.content.items():
+                if isinstance(value, dict):
+                    logging.info(f'    {key}:')
+                    for sub_key, sub_value in value.items():
+                        logging.info(f'      {sub_key}: {sub_value}')
+                else:
+                    logging.info(f'    {key}: {value}')
+        else:
+            logging.info(f'  Content: {message.content}')
 
     async def send_ping(self):
         """Send ping message"""
@@ -298,8 +319,6 @@ class VoiceInteractionSession:
             while self.running:
                 try:
                     message = await self.websocket.recv()
-                    if not self.shutting_down:
-                        logging.info(f'Raw message received: {message[:200]}...' if len(message) > 200 else f'Raw message received: {message}')
                     
                     try:
                         data = json.loads(message)
@@ -315,20 +334,28 @@ class VoiceInteractionSession:
                         
                         if not self.shutting_down:
                             msg = WebSocketMessage.from_dict(data)
-                            logging.info(f'Parsed message type: {msg.type}')
+                            msg_type = msg.type
+                            
+                            # Log all message types, including audio
+                            logging.info(f'Received message type: {msg_type}')
+                            if not self.shutting_down and msg_type != 'audio':
+                                logging.debug(f'Raw message: {message[:200]}...' if len(message) > 200 else f'Raw message: {message}')
 
-                            if msg.type == 'initialize':
+                            if msg_type == 'initialize':
                                 await self.handle_initialize(msg)
-                            elif msg.type == 'call_connect_response':
+                            elif msg_type == 'call_connect_response':
                                 await self.handle_call_connect_response(msg)
-                            elif msg.type == 'ping_response':
+                            elif msg_type == 'ping_response':
                                 await self.handle_ping_response(msg)
-                            elif msg.type == 'audio':
-                                logging.info('Processing audio message...')
+                            elif msg_type == 'audio':
+                                # Process audio without excessive logging
                                 await self._handle_audio_message(msg)
-                                logging.info('Audio message processed')
+                            elif msg_type == 'chat':
+                                await self.handle_chat(msg)
                             else:
-                                logging.info(f'Unknown message type: {msg.type}')
+                                logging.info(f'Unknown message type: {msg_type}')
+                                # Log the full message for unknown types
+                                logging.info(f'Full message: {json.dumps(data, indent=2)}')
 
                     except json.JSONDecodeError:
                         if not self.shutting_down:
@@ -450,8 +477,9 @@ class VoiceInteractionSession:
             peak = np.max(np.abs(audio_data))
             is_silent = rms < 0.01  # Adjust this threshold as needed
             
-            # Log audio metrics
-            logging.info(f'Audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, {"SILENT" if is_silent else "SOUND DETECTED"}')
+            # Only log non-silent audio to reduce log volume
+            if not is_silent:
+                logging.info(f'Input audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SOUND DETECTED')
             
             # Convert to int16 format (required by the server)
             audio_data = (audio_data * 32767).astype(np.int16)
@@ -468,9 +496,6 @@ class VoiceInteractionSession:
                     'timestamp_epoch_ms': int(datetime.now().timestamp() * 1000)
                 }
             )
-
-            # Log audio data being sent
-            logging.info(f'Sending audio data: {len(audio_data)} samples')
 
             # Send audio data asynchronously using the event loop in a thread-safe way
             self.loop.call_soon_threadsafe(
@@ -491,34 +516,41 @@ class VoiceInteractionSession:
                 logging.error('Output stream is not initialized')
                 return
                 
+            # Log receipt of audio message with timestamp
+            current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            logging.info(f'Processing audio message at {current_time}')
+                
             # Decode base64 audio data
             audio_data = base64.b64decode(message.content['audio_data'])
             logging.info(f'Decoded audio data length: {len(audio_data)} bytes')
             
             # Convert to int16 numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            logging.info(f'Audio array shape: {audio_array.shape}, dtype: {audio_array.dtype}')
             
             # Calculate audio metrics for debugging
             rms = np.sqrt(np.mean(np.square(audio_array.astype(np.float32) / 32767)))
             peak = np.max(np.abs(audio_array.astype(np.float32) / 32767))
             is_silent = rms < 0.01
-            logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, {"SILENT" if is_silent else "SOUND DETECTED"}')
+            
+            # Log audio metrics for all audio messages
+            if is_silent:
+                logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SILENT')
+            else:
+                logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SOUND DETECTED')
             
             # Convert to float32 for PyAudio
             audio_float = (audio_array / 32767).astype(np.float32)
-            logging.info(f'Float audio shape: {audio_float.shape}, dtype: {audio_float.dtype}')
             
             # Play audio
             bytes_data = audio_float.tobytes()
             logging.info(f'Writing {len(bytes_data)} bytes to audio output stream')
             self.output_stream.write(bytes_data)
             
-            # Add a small delay to ensure buffer is emptied
-            import time
-            time.sleep(0.1)  # 100ms delay to help ensure buffer is emptied
+            # Add a small delay to ensure buffer is emptied, using asyncio.sleep instead of time.sleep
+            # to avoid blocking the event loop
+            await asyncio.sleep(0.1)  # 100ms delay to help ensure buffer is emptied
             
-            logging.info('Audio data written to output stream')
+            logging.info('Audio message processing completed')
             
         except Exception as e:
             logging.error(f'Error processing output audio: {e}')
@@ -533,8 +565,8 @@ class VoiceInteractionSession:
         self._setup_audio_streams()
         
         # Ensure proper network initialization before connecting
-        import time
-        time.sleep(1)  # Brief pause to ensure system network is ready
+        # Use asyncio.sleep instead of time.sleep to avoid blocking the event loop
+        await asyncio.sleep(1)  # Brief pause to ensure system network is ready
         
         # Attempt to connect to websocket
         await self.connect_websocket()
