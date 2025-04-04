@@ -249,7 +249,7 @@ class VoiceInteractionSession:
             session_id=self.session_id,
             request_id=str(uuid.uuid4()),
             content={
-                'sample_rate': AUDIO_RATE,
+                'sample_rate': 24000,  # Match server's expected rate
                 'audio_codec': 'none',
                 'reconnect': False,
                 'is_private': False,
@@ -267,16 +267,12 @@ class VoiceInteractionSession:
         self.call_id = message.call_id
         self.sample_rate = message.content['sample_rate']
         logging.info(f'Call connected with ID: {self.call_id}, sample rate: {self.sample_rate}')
+        # Send initial ping
+        await self.send_ping()
 
-    async def handle_ping(self, message):
-        """Handle ping message"""
-        response = WebSocketMessage(
-            'ping_response',
-            session_id=self.session_id,
-            request_id=message.request_id,
-            content='ping'
-        )
-        await self.send_message(response)
+    async def handle_ping_response(self, message):
+        """Handle ping response message"""
+        logging.info('Received ping response')
 
     async def send_ping(self):
         """Send ping message"""
@@ -288,6 +284,8 @@ class VoiceInteractionSession:
             request_id=str(uuid.uuid4()),
             content='ping'
         )
+        logging.info('Sending ping message')
+        logging.info(f'Ping message: {ping_msg}')
         await self.send_message(ping_msg)
 
     async def handle_messages(self):
@@ -295,25 +293,30 @@ class VoiceInteractionSession:
         try:
             while self.running:
                 message = await self.websocket.recv()
+                logging.info(f'Raw message received: {message[:200]}...' if len(message) > 200 else f'Raw message received: {message}')
                 try:
                     data = json.loads(message)
                     msg = WebSocketMessage.from_dict(data)
+                    logging.info(f'Parsed message type: {msg.type}')
 
                     if msg.type == 'initialize':
                         await self.handle_initialize(msg)
                     elif msg.type == 'call_connect_response':
                         await self.handle_call_connect_response(msg)
-                    elif msg.type == 'ping':
-                        await self.handle_ping(msg)
+                    elif msg.type == 'ping_response':
+                        await self.handle_ping_response(msg)
                     elif msg.type == 'audio':
+                        logging.info('Processing audio message...')
                         await self._handle_audio_message(msg)
+                        logging.info('Audio message processed')
                     else:
-                        logging.debug(f'Received message of type: {msg.type}')
+                        logging.info(f'Unknown message type: {msg.type}')
 
                 except json.JSONDecodeError:
-                    logging.warning('Received invalid JSON message')
+                    logging.warning(f'Received invalid JSON message: {message[:200]}...' if len(message) > 200 else f'Received invalid JSON message: {message}')
                 except Exception as e:
                     logging.error(f'Error processing message: {e}')
+                    logging.error(f'Message content: {message[:200]}...' if len(message) > 200 else f'Message content: {message}')
 
         except Exception as e:
             logging.error(f'Error in message handling loop: {e}')
@@ -329,16 +332,37 @@ class VoiceInteractionSession:
 
     # This is a duplicate method, removing it as it conflicts with the first handle_messages method
 
-    # This method is already defined properly above as handle_ping(self, message)
+    # This method is already defined properly above as handle_ping_response(self, message)
 
     def _setup_audio_streams(self):
         """Initialize audio input and output streams"""
         if self.input_stream or self.output_stream:
             self._cleanup_audio_streams()
 
+        # Use server's sample rate (24000) for both input and output
+        input_rate = 24000  # Hardcoded to match server's expected rate
+        output_rate = self.sample_rate if self.sample_rate else input_rate
+        
+        # Log available audio devices for debugging
+        logging.info("=== Available Audio Devices ===")
+        default_input_device_info = self.audio.get_default_input_device_info()
+        default_input_device_index = default_input_device_info['index']
+        
+        for i in range(self.audio.get_device_count()):
+            device_info = self.audio.get_device_info_by_index(i)
+            is_input = device_info['maxInputChannels'] > 0
+            is_default = " (DEFAULT)" if i == default_input_device_index and is_input else ""
+            
+            if is_input:
+                logging.info(f"Input Device {i}: {device_info['name']}{is_default}")
+                logging.info(f"  Sample Rate: {int(device_info['defaultSampleRate'])}")
+                logging.info(f"  Channels: {device_info['maxInputChannels']}")
+        
+        logging.info(f"\nUsing default input device: {default_input_device_info['name']} (index {default_input_device_index})")
+
         # Input stream for microphone
         self.input_stream = self.audio.open(
-            rate=AUDIO_RATE,
+            rate=input_rate,
             channels=self.channels,
             format=self.audio_format,
             input=True,
@@ -348,14 +372,14 @@ class VoiceInteractionSession:
 
         # Output stream for speakers
         self.output_stream = self.audio.open(
-            rate=AUDIO_RATE,
+            rate=output_rate,
             channels=self.channels,
             format=self.audio_format,
             output=True,
             frames_per_buffer=self.frames_per_buffer
         )
 
-        logging.info('Audio streams initialized')
+        logging.info(f'Audio streams initialized (input rate: {input_rate}, output rate: {output_rate})')
 
     def _cleanup_audio_streams(self):
         """Clean up audio streams"""
@@ -371,48 +395,98 @@ class VoiceInteractionSession:
 
     def _audio_input_callback(self, in_data, frame_count, time_info, status):
         """Callback for audio input stream"""
-        if self.running and self.websocket:
-            # Convert audio data to base64
-            try:
-                # Convert bytes to numpy array
-                audio_data = np.frombuffer(in_data, dtype=np.float32)
-                # Convert to int16 format (required by the server)
-                audio_data = (audio_data * 32767).astype(np.int16)
-                # Convert to base64
-                audio_base64 = base64.b64encode(audio_data.tobytes()).decode('utf-8')
+        if not self.running:
+            logging.debug('Audio callback called but self.running is False')
+            return (in_data, pyaudio.paContinue)
+            
+        if not self.websocket:
+            logging.debug('Audio callback called but websocket is not connected')
+            return (in_data, pyaudio.paContinue)
 
-                # Create audio message
-                audio_msg = WebSocketMessage(
-                    'audio',
-                    session_id=self.session_id,
-                    call_id=self.call_id,
-                    content={
-                        'audio_data': audio_base64,
-                        'timestamp_epoch_ms': int(datetime.now().timestamp() * 1000)
-                    }
-                )
+        # Convert audio data to base64
+        try:
+            # Convert bytes to numpy array
+            audio_data = np.frombuffer(in_data, dtype=np.float32)
+            
+            # Calculate audio metrics for debugging
+            rms = np.sqrt(np.mean(np.square(audio_data)))
+            peak = np.max(np.abs(audio_data))
+            is_silent = rms < 0.01  # Adjust this threshold as needed
+            
+            # Log audio metrics
+            logging.info(f'Audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, {"SILENT" if is_silent else "SOUND DETECTED"}')
+            
+            # Convert to int16 format (required by the server)
+            audio_data = (audio_data * 32767).astype(np.int16)
+            # Convert to base64
+            audio_base64 = base64.b64encode(audio_data.tobytes()).decode('utf-8')
 
-                # Send audio data asynchronously
-                asyncio.create_task(self.send_message(audio_msg))
+            # Create audio message
+            audio_msg = WebSocketMessage(
+                'audio',
+                session_id=self.session_id,
+                call_id=self.call_id,
+                content={
+                    'audio_data': audio_base64,
+                    'timestamp_epoch_ms': int(datetime.now().timestamp() * 1000)
+                }
+            )
 
-            except Exception as e:
-                logging.error(f'Error processing input audio: {e}')
+            # Log audio data being sent
+            logging.info(f'Sending audio data: {len(audio_data)} samples')
+
+            # Send audio data asynchronously using the event loop in a thread-safe way
+            self.loop.call_soon_threadsafe(
+                lambda msg=audio_msg: self.loop.create_task(self.send_message(msg))
+            )
+
+        except Exception as e:
+            logging.error(f'Error processing input audio: {e}')
+            import traceback
+            logging.error(f'Traceback: {traceback.format_exc()}')
 
         return (in_data, pyaudio.paContinue)
 
     async def _handle_audio_message(self, message):
         """Handle incoming audio message"""
         try:
+            if not self.output_stream:
+                logging.error('Output stream is not initialized')
+                return
+                
             # Decode base64 audio data
             audio_data = base64.b64decode(message.content['audio_data'])
+            logging.info(f'Decoded audio data length: {len(audio_data)} bytes')
+            
             # Convert to int16 numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
+            logging.info(f'Audio array shape: {audio_array.shape}, dtype: {audio_array.dtype}')
+            
+            # Calculate audio metrics for debugging
+            rms = np.sqrt(np.mean(np.square(audio_array.astype(np.float32) / 32767)))
+            peak = np.max(np.abs(audio_array.astype(np.float32) / 32767))
+            is_silent = rms < 0.01
+            logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, {"SILENT" if is_silent else "SOUND DETECTED"}')
+            
             # Convert to float32 for PyAudio
             audio_float = (audio_array / 32767).astype(np.float32)
+            logging.info(f'Float audio shape: {audio_float.shape}, dtype: {audio_float.dtype}')
+            
             # Play audio
-            self.output_stream.write(audio_float.tobytes())
+            bytes_data = audio_float.tobytes()
+            logging.info(f'Writing {len(bytes_data)} bytes to audio output stream')
+            self.output_stream.write(bytes_data)
+            
+            # Add a small delay to ensure buffer is emptied
+            import time
+            time.sleep(0.1)  # 100ms delay to help ensure buffer is emptied
+            
+            logging.info('Audio data written to output stream')
+            
         except Exception as e:
             logging.error(f'Error processing output audio: {e}')
+            import traceback
+            logging.error(f'Traceback: {traceback.format_exc()}')
 
     async def start_session(self):
         """Start a new voice interaction session"""

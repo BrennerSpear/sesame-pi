@@ -21,3 +21,4 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Notes
 - Use additional_headers instead of extra_headers
+- Don't try to run any of the python scripts - I'll do that separately
