@@ -81,7 +81,7 @@ class VoiceInteractionSession:
         self.output_stream = None
         self.audio_format = pyaudio.paFloat32
         self.channels = 1
-        self.frames_per_buffer = 637  # Calculated to achieve ~1822 byte messages after JSON+base64 encoding
+        self.frames_per_buffer = 637  # DO NOT CHANGE Calculated to achieve ~1822 byte messages after JSON+base64 encoding
         # Session state
         self.session_id = None
         self.call_id = None
@@ -546,9 +546,7 @@ class VoiceInteractionSession:
             logging.info(f'(incoming) Writing {len(bytes_data)} bytes to audio output stream')
             self.output_stream.write(bytes_data)
             
-            # Add a small delay to ensure buffer is emptied, using asyncio.sleep instead of time.sleep
-            # to avoid blocking the event loop
-            await asyncio.sleep(0.1)  # 100ms delay to help ensure buffer is emptied
+            # Removed the 0.1s delay that was causing pauses between audio chunks
             
             logging.info('(incoming) Audio message processing completed')
             
