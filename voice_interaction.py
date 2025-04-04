@@ -80,7 +80,7 @@ class VoiceInteractionSession:
         self.output_stream = None
         self.audio_format = pyaudio.paFloat32
         self.channels = 1
-        self.frames_per_buffer = 1024
+        self.frames_per_buffer = 637  # Calculated to achieve ~1822 byte messages after JSON+base64 encoding
         # Session state
         self.session_id = None
         self.call_id = None
@@ -88,6 +88,8 @@ class VoiceInteractionSession:
         self.press_time = None
         self.loop = asyncio.get_event_loop()
         self.session_active = False  # Track if a session is currently active
+        self.ping_received = False  # Track if we've received a ping response
+        self.first_audio_sent = False  # Track if we've sent the first audio message
         # Shutdown coordination
         self.shutting_down = False  # Flag to indicate we're in shutdown mode
         self.disconnect_event = None  # Event to signal when disconnect response is received
@@ -224,7 +226,11 @@ class VoiceInteractionSession:
     async def send_message(self, message):
         """Send a WebSocket message"""
         try:
-            await self.websocket.send(json.dumps(message.to_dict()))
+            msg_dict = message.to_dict()
+            msg_json = json.dumps(msg_dict)
+            msg_length = len(msg_json)
+            logging.info(f'Sending message type: {message.type}, length: {msg_length} bytes')
+            await self.websocket.send(msg_json)
         except Exception as e:
             logging.error(f'Error sending message: {e}')
 
@@ -276,7 +282,8 @@ class VoiceInteractionSession:
 
     async def handle_ping_response(self, message):
         """Handle ping response message"""
-        logging.info('Received ping response')
+        self.ping_received = True
+        logging.info('Received ping response - now accepting audio input')
         
     async def handle_chat(self, message):
         """Handle chat message"""
@@ -319,6 +326,7 @@ class VoiceInteractionSession:
             while self.running:
                 try:
                     message = await self.websocket.recv()
+                    msg_length = len(message)
                     
                     try:
                         data = json.loads(message)
@@ -336,8 +344,8 @@ class VoiceInteractionSession:
                             msg = WebSocketMessage.from_dict(data)
                             msg_type = msg.type
                             
-                            # Log all message types, including audio
-                            logging.info(f'Received message type: {msg_type}')
+                            # Log all message types and lengths, including audio
+                            logging.info(f'Received message type: {msg_type}, length: {msg_length} bytes')
                             if not self.shutting_down and msg_type != 'audio':
                                 logging.debug(f'Raw message: {message[:200]}...' if len(message) > 200 else f'Raw message: {message}')
 
@@ -466,6 +474,10 @@ class VoiceInteractionSession:
         if not self.websocket:
             logging.debug('Audio callback called but websocket is not connected')
             return (in_data, pyaudio.paContinue)
+            
+        if not self.ping_received:
+            logging.debug('Audio callback called but ping response not yet received')
+            return (in_data, pyaudio.paContinue)
 
         # Convert audio data to base64
         try:
@@ -492,10 +504,15 @@ class VoiceInteractionSession:
                 session_id=self.session_id,
                 call_id=self.call_id,
                 content={
-                    'audio_data': audio_base64,
-                    'timestamp_epoch_ms': int(datetime.now().timestamp() * 1000)
+                    'audio_data': audio_base64
                 }
             )
+
+            # Log the first audio message's complete contents
+            if not self.first_audio_sent:
+                msg_dict = audio_msg.to_dict()
+                logging.info(f'First audio message complete contents: {json.dumps(msg_dict, indent=2)}')
+                self.first_audio_sent = True
 
             # Send audio data asynchronously using the event loop in a thread-safe way
             self.loop.call_soon_threadsafe(
@@ -561,6 +578,8 @@ class VoiceInteractionSession:
         """Start a new voice interaction session"""
         self.running = True
         self.session_active = True  # Set session as active
+        self.ping_received = False  # Reset ping status for new session
+        self.first_audio_sent = False  # Reset first audio message flag
         logging.info('Session Started')
         self._setup_audio_streams()
         
