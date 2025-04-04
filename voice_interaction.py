@@ -88,15 +88,19 @@ class VoiceInteractionSession:
         self.press_time = None
         self.loop = asyncio.get_event_loop()
         self.session_active = False  # Track if a session is currently active
+        # Shutdown coordination
+        self.shutting_down = False  # Flag to indicate we're in shutdown mode
+        self.disconnect_event = None  # Event to signal when disconnect response is received
+        self.pending_disconnect_id = None  # Track the request_id of a pending disconnect
         
         if IS_MACOS:
             # Setup keyboard handler for macOS
             self.keyboard_listener = keyboard.Listener(
-                on_press=lambda key: self._handle_keyboard_press(None) if key == keyboard.Key.space else None,
-                on_release=lambda key: self._handle_keyboard_release(None) if key == keyboard.Key.space else None
+                on_press=self._handle_key_press,
+                on_release=self._handle_key_release
             )
             self.keyboard_listener.start()
-            logging.info('Initialized keyboard handler for macOS (using spacebar)')
+            logging.info('Initialized keyboard handler for macOS (using spacebar, press Q to quit)')
         else:
             # Initialize GPIO button for Raspberry Pi
             self.button = Button(button_pin, bounce_time=0.05)
@@ -292,38 +296,71 @@ class VoiceInteractionSession:
         """Handle incoming WebSocket messages"""
         try:
             while self.running:
-                message = await self.websocket.recv()
-                logging.info(f'Raw message received: {message[:200]}...' if len(message) > 200 else f'Raw message received: {message}')
                 try:
-                    data = json.loads(message)
-                    msg = WebSocketMessage.from_dict(data)
-                    logging.info(f'Parsed message type: {msg.type}')
+                    message = await self.websocket.recv()
+                    if not self.shutting_down:
+                        logging.info(f'Raw message received: {message[:200]}...' if len(message) > 200 else f'Raw message received: {message}')
+                    
+                    try:
+                        data = json.loads(message)
+                        
+                        # Check for disconnect response during shutdown
+                        if self.shutting_down and self.pending_disconnect_id and \
+                           data.get('type') == 'call_disconnect_response' and \
+                           data.get('request_id') == self.pending_disconnect_id:
+                            logging.info('Received call_disconnect_response during shutdown')
+                            if self.disconnect_event:
+                                self.disconnect_event.set()
+                            continue
+                        
+                        if not self.shutting_down:
+                            msg = WebSocketMessage.from_dict(data)
+                            logging.info(f'Parsed message type: {msg.type}')
 
-                    if msg.type == 'initialize':
-                        await self.handle_initialize(msg)
-                    elif msg.type == 'call_connect_response':
-                        await self.handle_call_connect_response(msg)
-                    elif msg.type == 'ping_response':
-                        await self.handle_ping_response(msg)
-                    elif msg.type == 'audio':
-                        logging.info('Processing audio message...')
-                        await self._handle_audio_message(msg)
-                        logging.info('Audio message processed')
+                            if msg.type == 'initialize':
+                                await self.handle_initialize(msg)
+                            elif msg.type == 'call_connect_response':
+                                await self.handle_call_connect_response(msg)
+                            elif msg.type == 'ping_response':
+                                await self.handle_ping_response(msg)
+                            elif msg.type == 'audio':
+                                logging.info('Processing audio message...')
+                                await self._handle_audio_message(msg)
+                                logging.info('Audio message processed')
+                            else:
+                                logging.info(f'Unknown message type: {msg.type}')
+
+                    except json.JSONDecodeError:
+                        if not self.shutting_down:
+                            logging.warning(f'Received invalid JSON message: {message[:200]}...' if len(message) > 200 else f'Received invalid JSON message: {message}')
+                    except Exception as e:
+                        if not self.shutting_down:
+                            logging.error(f'Error processing message: {e}')
+                            logging.error(f'Message content: {message[:200]}...' if len(message) > 200 else f'Message content: {message}')
+                
+                except websockets.exceptions.ConnectionClosedOK:
+                    # Normal closure during shutdown
+                    if self.shutting_down:
+                        logging.info('WebSocket closed normally during shutdown')
+                        break
                     else:
-                        logging.info(f'Unknown message type: {msg.type}')
-
-                except json.JSONDecodeError:
-                    logging.warning(f'Received invalid JSON message: {message[:200]}...' if len(message) > 200 else f'Received invalid JSON message: {message}')
+                        raise  # Re-raise if not shutting down
+                
                 except Exception as e:
-                    logging.error(f'Error processing message: {e}')
-                    logging.error(f'Message content: {message[:200]}...' if len(message) > 200 else f'Message content: {message}')
+                    if not self.shutting_down:
+                        raise  # Re-raise if not shutting down
+                    else:
+                        # During shutdown, just log and break
+                        logging.info(f'WebSocket error during shutdown: {e}')
+                        break
 
         except Exception as e:
-            logging.error(f'Error in message handling loop: {e}')
-            if self.running:
-                # Attempt to reconnect if this wasn't a clean shutdown
-                self.websocket = None
-                await self.connect_websocket()
+            if not self.shutting_down:
+                logging.error(f'Error in message handling loop: {e}')
+                if self.running:
+                    # Attempt to reconnect if this wasn't a clean shutdown
+                    self.websocket = None
+                    await self.connect_websocket()
 
     async def authenticate(self):
         """Send JWT authentication message"""
@@ -502,12 +539,69 @@ class VoiceInteractionSession:
         # Attempt to connect to websocket
         await self.connect_websocket()
 
+    async def disconnect_call(self):
+        """Send a call_disconnect message and wait for the response"""
+        if not self.session_id or not self.call_id or not self.websocket:
+            logging.info('No active call to disconnect')
+            return
+            
+        import uuid
+        request_id = str(uuid.uuid4())
+        self.pending_disconnect_id = request_id
+        
+        # Create an event to wait for the disconnect response
+        self.disconnect_event = asyncio.Event()
+        
+        # Send call_disconnect message
+        disconnect_msg = WebSocketMessage(
+            'call_disconnect',
+            session_id=self.session_id,
+            call_id=self.call_id,
+            request_id=request_id,
+            content={
+                'reason': 'user_request'
+            }
+        )
+        
+        logging.info('Sending call_disconnect message')
+        try:
+            await self.send_message(disconnect_msg)
+            
+            # Wait for disconnect response with timeout
+            try:
+                await asyncio.wait_for(self.disconnect_event.wait(), timeout=3.0)
+                logging.info('Disconnect complete')
+            except asyncio.TimeoutError:
+                logging.warning('Timed out waiting for call_disconnect_response')
+        except Exception as e:
+            if not self.shutting_down:
+                logging.error(f'Error in disconnect process: {e}')
+        finally:
+            # Clean up
+            self.disconnect_event = None
+            self.pending_disconnect_id = None
+
     async def stop_session(self):
         """Stop the current voice interaction session"""
         self.running = False
         self.session_active = False  # Set session as inactive
+        self.shutting_down = True  # Set shutdown flag
+        
+        # First disconnect the call if active
+        if self.session_id and self.call_id and self.websocket:
+            try:
+                await self.disconnect_call()
+            except Exception as e:
+                logging.info(f'Non-critical error during call disconnect: {e}')
+        
+        # Then close the websocket
         if self.websocket:
-            await self.websocket.close()
+            try:
+                await self.websocket.close()
+            except Exception as e:
+                logging.info(f'Non-critical error closing websocket: {e}')
+            
+        # Clean up audio resources
         self._cleanup_audio_streams()
         logging.info('Session Terminated')
 
@@ -546,23 +640,62 @@ class VoiceInteractionSession:
         """Handle Raspberry Pi GPIO button release"""
         self._handle_input_release()
 
-    def _handle_keyboard_press(self, event):
+    def _handle_key_press(self, key):
         """Handle macOS keyboard press"""
-        self._handle_input_press()
+        if key == keyboard.Key.space:
+            self._handle_input_press()
+        elif hasattr(key, 'char') and key.char == 'q':
+            logging.info('Q key pressed - terminating application')
+            
+            # Prevent multiple shutdown attempts
+            if self.shutting_down:
+                return
+                
+            # Create a graceful shutdown sequence
+            async def shutdown_sequence():
+                try:
+                    # Stop the session (which will disconnect the call)
+                    await self.stop_session()
+                    
+                    # Cancel all other tasks
+                    for task in asyncio.all_tasks(self.loop):
+                        if task is not asyncio.current_task():
+                            task.cancel()
+                    
+                    # Allow a moment for tasks to clean up
+                    await asyncio.sleep(0.5)
+                    
+                    # Stop the loop
+                    self.loop.stop()
+                except Exception as e:
+                    logging.info(f'Non-critical error in shutdown sequence: {e}')
+                    # Ensure the loop stops even if there's an error
+                    self.loop.stop()
+            
+            # Schedule the shutdown sequence
+            self.loop.call_soon_threadsafe(
+                lambda: self.loop.create_task(shutdown_sequence())
+            )
 
-    def _handle_keyboard_release(self, event):
+    def _handle_key_release(self, key):
         """Handle macOS keyboard release"""
-        self._handle_input_release()
+        if key == keyboard.Key.space:
+            self._handle_input_release()
 
 async def main():
     """Main entry point for the voice interaction application"""
     try:
         session = VoiceInteractionSession(button_pin=17)
-        input_type = 'spacebar' if IS_MACOS else 'GPIO button'
+        input_type = 'spacebar (press Q to quit)' if IS_MACOS else 'GPIO button'
         logging.info(f'Voice Interaction Service started. Waiting for {input_type} press...')
         
         # Keep the application running until interrupted
-        await asyncio.Future()  # Run forever until interrupted
+        try:
+            # Create a future that we can cancel later
+            main_future = asyncio.get_event_loop().create_future()
+            await main_future  # Run forever until interrupted or cancelled
+        except asyncio.CancelledError:
+            logging.info('Main task cancelled')
             
     except Exception as e:
         logging.error(f'Fatal error: {e}')
@@ -574,7 +707,15 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         logging.info('Application terminated by user')
     except Exception as e:
-        logging.error(f'Application error: {e}')
+        # Filter out expected shutdown-related errors
+        expected_errors = [
+            "Event loop stopped before Future completed",
+            "Task was destroyed but it is pending",
+            "asyncio.run() cannot be called from a running event loop"
+        ]
+        
+        if not any(expected_error in str(e) for expected_error in expected_errors):
+            logging.error(f'Application error: {e}')
     finally:
         # Clean up PyAudio
         try:
