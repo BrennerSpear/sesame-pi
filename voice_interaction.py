@@ -25,7 +25,8 @@ else:
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s %(levelname)s: %(message)s',
+    format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+    datefmt='%M:%S',
     handlers=[
         logging.FileHandler('session.log'),
         logging.StreamHandler()  # This will print to console
@@ -287,24 +288,7 @@ class VoiceInteractionSession:
         
     async def handle_chat(self, message):
         """Handle chat message"""
-        logging.info(f'Chat message received:')
-        logging.info(f'  Session ID: {message.session_id}')
-        logging.info(f'  Call ID: {message.call_id}')
-        if message.request_id:
-            logging.info(f'  Request ID: {message.request_id}')
-        
-        # Log the chat content in a readable format
-        if isinstance(message.content, dict):
-            logging.info('  Content:')
-            for key, value in message.content.items():
-                if isinstance(value, dict):
-                    logging.info(f'    {key}:')
-                    for sub_key, sub_value in value.items():
-                        logging.info(f'      {sub_key}: {sub_value}')
-                else:
-                    logging.info(f'    {key}: {value}')
-        else:
-            logging.info(f'  Content: {message.content}')
+        # logging.info(f'Chat message received')
 
     async def send_ping(self):
         """Send ping message"""
@@ -317,7 +301,6 @@ class VoiceInteractionSession:
             content='ping'
         )
         logging.info('Sending ping message')
-        logging.info(f'Ping message: {ping_msg}')
         await self.send_message(ping_msg)
 
     async def handle_messages(self):
@@ -509,10 +492,10 @@ class VoiceInteractionSession:
             )
 
             # Log the first audio message's complete contents
-            if not self.first_audio_sent:
-                msg_dict = audio_msg.to_dict()
-                logging.info(f'First audio message complete contents: {json.dumps(msg_dict, indent=2)}')
-                self.first_audio_sent = True
+            # if not self.first_audio_sent:
+            #     msg_dict = audio_msg.to_dict()
+            #     logging.info(f'First audio message complete contents: {json.dumps(msg_dict, indent=2)}')
+            #     self.first_audio_sent = True
 
             # Send audio data asynchronously using the event loop in a thread-safe way
             self.loop.call_soon_threadsafe(
@@ -535,11 +518,11 @@ class VoiceInteractionSession:
                 
             # Log receipt of audio message with timestamp
             current_time = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-            logging.info(f'Processing audio message at {current_time}')
+            logging.info(f'(incoming) Processing audio message at {current_time}')
                 
             # Decode base64 audio data
             audio_data = base64.b64decode(message.content['audio_data'])
-            logging.info(f'Decoded audio data length: {len(audio_data)} bytes')
+            logging.info(f'(incoming) Decoded audio data length: {len(audio_data)} bytes')
             
             # Convert to int16 numpy array
             audio_array = np.frombuffer(audio_data, dtype=np.int16)
@@ -551,23 +534,23 @@ class VoiceInteractionSession:
             
             # Log audio metrics for all audio messages
             if is_silent:
-                logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SILENT')
+                logging.info(f'(incoming) Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SILENT')
             else:
-                logging.info(f'Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SOUND DETECTED')
+                logging.info(f'(incoming) Output audio metrics - RMS: {rms:.6f}, Peak: {peak:.6f}, SOUND DETECTED')
             
             # Convert to float32 for PyAudio
             audio_float = (audio_array / 32767).astype(np.float32)
             
             # Play audio
             bytes_data = audio_float.tobytes()
-            logging.info(f'Writing {len(bytes_data)} bytes to audio output stream')
+            logging.info(f'(incoming) Writing {len(bytes_data)} bytes to audio output stream')
             self.output_stream.write(bytes_data)
             
             # Add a small delay to ensure buffer is emptied, using asyncio.sleep instead of time.sleep
             # to avoid blocking the event loop
             await asyncio.sleep(0.1)  # 100ms delay to help ensure buffer is emptied
             
-            logging.info('Audio message processing completed')
+            logging.info('(incoming) Audio message processing completed')
             
         except Exception as e:
             logging.error(f'Error processing output audio: {e}')
