@@ -619,10 +619,12 @@ class VoiceInteractionSession:
         self.session_active = False  # Set session as inactive
         self.shutting_down = True  # Set shutdown flag
         
-        # First disconnect the call if active
+        # First disconnect the call if active and wait for it to complete
         if self.session_id and self.call_id and self.websocket:
             try:
                 await self.disconnect_call()
+                # Add a small delay to ensure any pending messages are processed
+                await asyncio.sleep(0.2)
             except Exception as e:
                 logging.info(f'Non-critical error during call disconnect: {e}')
         
@@ -688,6 +690,9 @@ class VoiceInteractionSession:
                 try:
                     # Stop the session (which will disconnect the call)
                     await self.stop_session()
+                    
+                    # Add a small delay to ensure session is fully stopped
+                    await asyncio.sleep(0.5)
                     
                     # Cancel all other tasks
                     for task in asyncio.all_tasks(self.loop):
