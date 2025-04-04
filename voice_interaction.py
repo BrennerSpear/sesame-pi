@@ -86,6 +86,7 @@ class VoiceInteractionSession:
         self.sample_rate = None
         self.press_time = None
         self.loop = asyncio.get_event_loop()
+        self.session_active = False  # Track if a session is currently active
         
         if IS_MACOS:
             # Setup keyboard handler for macOS
@@ -115,22 +116,34 @@ class VoiceInteractionSession:
         import websockets
         import jwt
         from urllib.parse import urlencode
+        
+        # Log websockets version for debugging
+        logging.info(f"Using websockets version: {websockets.__version__}")
 
-        # Validate JWT token format first
+        # Validate JWT token format and expiry
         try:
-            # Just decode without verification to check format
-            jwt.decode(self.jwt_token, options={"verify_signature": False})
+            # Just decode without verification to check format and expiry
+            token_data = jwt.decode(self.jwt_token, options={"verify_signature": False})
             logging.info('JWT token format is valid')
+            # Log expiry time
+            if 'exp' in token_data:
+                expiry = datetime.fromtimestamp(token_data['exp'])
+                now = datetime.now()
+                logging.info(f'Token expires at: {expiry} (in {expiry - now} seconds)')
+                if expiry <= now:
+                    logging.error('Token has expired!')
+                    return
         except jwt.InvalidTokenError as e:
             logging.error(f'Invalid JWT token format: {e}')
             return
 
-        # Setup SSL context
+        # Temporarily disable SSL verification for testing
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
+        logging.info('SSL verification temporarily disabled for testing')
 
-        # Prepare query parameters
+        # Prepare query parameters (including id_token)
         params = {
             'id_token': self.jwt_token,
             'client_name': CLIENT_NAME,
@@ -144,7 +157,11 @@ class VoiceInteractionSession:
                 logging.info('Attempting WebSocket connection...')
                 async with websockets.connect(
                     ws_uri_with_params,
-                    ssl=ssl_context
+                    ssl=ssl_context,
+                    additional_headers={
+                        'Connection': 'Upgrade', 
+                        'Upgrade': 'websocket'
+                    }
                 ) as ws:
                     logging.info('WebSocket connection established successfully')
                     self.websocket = ws
@@ -152,7 +169,10 @@ class VoiceInteractionSession:
 
             except websockets.exceptions.WebSocketException as e:
                 if "401" in str(e) or "403" in str(e):
-                    logging.error('Authentication failed: Invalid or expired JWT token')
+                    logging.error(f'Authentication failed: {e}')
+                    logging.error('Full error details:')
+                    for line in str(e).split('\n'):
+                        logging.error(f'  {line}')
                     # Don't retry on auth failure
                     return
                 else:
@@ -160,7 +180,26 @@ class VoiceInteractionSession:
 
             except ssl.SSLCertVerificationError as e:
                 logging.error(f'SSL Certificate verification failed: {e}')
+                logging.error('This might be due to an invalid or self-signed certificate.')
+                logging.error('If you trust this server, you can try to obtain its certificate or temporarily disable verification.')
 
+            except OSError as e:
+                if e.errno == 49:  # Can't assign requested address
+                    logging.error(f"Connection address binding error: {e}")
+                    # Try a different approach - this often happens when network interface changes
+                    import socket
+                    # Log network interfaces for debugging
+                    try:
+                        hostname = socket.gethostname()
+                        local_ip = socket.gethostbyname(hostname)
+                        logging.info(f"Local hostname: {hostname}, IP: {local_ip}")
+                    except Exception as net_err:
+                        logging.error(f"Failed to get network info: {net_err}")
+                    
+                    # Wait a bit longer before retry when hitting address errors
+                    await asyncio.sleep(5)
+                else:
+                    logging.error(f'OSError: {e}')
             except Exception as e:
                 logging.error(f'Unexpected error: {type(e).__name__}: {e}')
 
@@ -281,26 +320,9 @@ class VoiceInteractionSession:
         auth_message = json.dumps({'token': self.jwt_token})
         await self.websocket.send(auth_message)
 
-    async def handle_messages(self):
-        """Handle incoming WebSocket messages"""
-        try:
-            while self.running:
-                message = await self.websocket.recv()
-                try:
-                    data = json.loads(message)
-                    if data.get('type') == 'ping':
-                        await self.handle_ping()
-                except json.JSONDecodeError:
-                    logging.warning('Received invalid JSON message')
-        except Exception as e:
-            logging.error(f'Error handling messages: {e}')
+    # This is a duplicate method, removing it as it conflicts with the first handle_messages method
 
-    async def handle_ping(self):
-        """Handle ping messages from the server"""
-        try:
-            await self.websocket.send(json.dumps({'type': 'pong'}))
-        except Exception as e:
-            logging.error(f'Error sending pong: {e}')
+    # This method is already defined properly above as handle_ping(self, message)
 
     def _setup_audio_streams(self):
         """Initialize audio input and output streams"""
@@ -388,13 +410,21 @@ class VoiceInteractionSession:
     async def start_session(self):
         """Start a new voice interaction session"""
         self.running = True
+        self.session_active = True  # Set session as active
         logging.info('Session Started')
         self._setup_audio_streams()
+        
+        # Ensure proper network initialization before connecting
+        import time
+        time.sleep(1)  # Brief pause to ensure system network is ready
+        
+        # Attempt to connect to websocket
         await self.connect_websocket()
 
     async def stop_session(self):
         """Stop the current voice interaction session"""
         self.running = False
+        self.session_active = False  # Set session as inactive
         if self.websocket:
             await self.websocket.close()
         self._cleanup_audio_streams()
@@ -416,12 +446,16 @@ class VoiceInteractionSession:
 
         if press_duration >= 2.0:
             # Long press (>= 2 seconds) - stop session
-            logging.info('Long press detected - stopping session')
-            self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.stop_session()))
+            if self.session_active:
+                logging.info('Long press detected - stopping session')
+                self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.stop_session()))
         else:
-            # Short press - start session
-            logging.info('Short press detected - starting session')
-            self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.start_session()))
+            # Short press - start session only if not already active
+            if not self.session_active:
+                logging.info('Short press detected - starting session')
+                self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.start_session()))
+            else:
+                logging.info('Session already active, ignoring short press')
 
     def _handle_button_press(self):
         """Handle Raspberry Pi GPIO button press"""
