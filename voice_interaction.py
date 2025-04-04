@@ -5,6 +5,7 @@ import os
 import sys
 import platform
 import base64
+import secrets
 from datetime import datetime
 from functools import partial
 import pyaudio
@@ -34,7 +35,7 @@ logging.basicConfig(
 # Load configuration from environment variables
 AUDIO_RATE = int(os.getenv('AUDIO_RATE', '16000'))
 CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '1024'))
-CLIENT_NAME = os.getenv('CLIENT_NAME', 'Sesame-Pi')
+CLIENT_NAME = os.getenv('CLIENT_NAME', 'RP-Web')  # Changed from 'Sesame-Pi' to match working request
 CLIENT_TIMEZONE = os.getenv('CLIENT_TIMEZONE', 'America/New_York')
 
 # WebSocket configuration
@@ -155,12 +156,18 @@ class VoiceInteractionSession:
         while True:
             try:
                 logging.info('Attempting WebSocket connection...')
+                # Generate a random WebSocket key (16 random bytes, base64 encoded)
+                websocket_key = base64.b64encode(secrets.token_bytes(16)).decode()
+                
                 async with websockets.connect(
                     ws_uri_with_params,
                     ssl=ssl_context,
                     additional_headers={
                         'Connection': 'Upgrade', 
-                        'Upgrade': 'websocket'
+                        'Upgrade': 'websocket',
+                        'sec-websocket-key': websocket_key,
+                        'sec-websocket-version': '13',
+                        'sec-websocket-extensions': 'permessage-deflate; client_max_window_bits'
                     }
                 ) as ws:
                     logging.info('WebSocket connection established successfully')
