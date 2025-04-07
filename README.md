@@ -18,3 +18,6 @@ defaults.pcm.card 1
 defaults.ctl.card 1
 
 speaker-test -D plughw:1,0 -t wav
+
+sudo apt-get install -y python3-gpiod
+sudo apt-get install -y libasound2-dev
