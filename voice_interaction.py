@@ -17,9 +17,8 @@ load_dotenv()
 
 # Platform-specific imports
 IS_MACOS = platform.system() == 'Darwin'
-if IS_MACOS:
-    from pynput import keyboard
-else:
+from pynput import keyboard
+if not IS_MACOS:
     from gpiozero import Button
 
 # Configure logging
@@ -96,20 +95,24 @@ class VoiceInteractionSession:
         self.disconnect_event = None  # Event to signal when disconnect response is received
         self.pending_disconnect_id = None  # Track the request_id of a pending disconnect
         
-        if IS_MACOS:
-            # Setup keyboard handler for macOS
-            self.keyboard_listener = keyboard.Listener(
-                on_press=self._handle_key_press,
-                on_release=self._handle_key_release
-            )
-            self.keyboard_listener.start()
-            logging.info('Initialized keyboard handler for macOS (using spacebar, press Q to quit)')
-        else:
+        # Setup keyboard handler for all platforms
+        self.keyboard_listener = keyboard.Listener(
+            on_press=self._handle_key_press,
+            on_release=self._handle_key_release
+        )
+        self.keyboard_listener.start()
+        logging.info('Initialized keyboard handler (using spacebar, press Q to quit)')
+        
+        if not IS_MACOS:
             # Initialize GPIO button for Raspberry Pi
-            self.button = Button(button_pin, bounce_time=0.05)
-            self.button.when_pressed = self._handle_button_press
-            self.button.when_released = self._handle_button_release
-            logging.info(f'Initialized GPIO button on pin {button_pin}')
+            try:
+                self.button = Button(button_pin, bounce_time=0.05)
+                self.button.when_pressed = self._handle_button_press
+                self.button.when_released = self._handle_button_release
+                logging.info(f'Initialized GPIO button on pin {button_pin}')
+            except Exception as e:
+                self.button = None
+                logging.warning(f'Failed to initialize GPIO button: {e}. Continuing with keyboard input only.')
         self.jwt_token = os.getenv('JWT_TOKEN')
         if not self.jwt_token:
             raise ValueError("JWT_TOKEN environment variable not set")
@@ -723,7 +726,7 @@ async def main():
     """Main entry point for the voice interaction application"""
     try:
         session = VoiceInteractionSession(button_pin=17)
-        input_type = 'spacebar (press Q to quit)' if IS_MACOS else 'GPIO button'
+        input_type = 'spacebar (press Q to quit)' + (' or GPIO button' if not IS_MACOS else '')
         logging.info(f'Voice Interaction Service started. Waiting for {input_type} press...')
         
         # Keep the application running until interrupted
