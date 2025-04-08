@@ -6,6 +6,7 @@ import sys
 import platform
 import base64
 import secrets
+import time
 from datetime import datetime
 from functools import partial
 import pyaudio
@@ -101,10 +102,8 @@ class VoiceInteractionSession:
         self.disconnect_event = None  # Event to signal when disconnect response is received
         self.pending_disconnect_id = None  # Track the request_id of a pending disconnect
         
-        # Initialize keyboard handler
-        self.running = True
+        # Initialize keyboard handler for macOS
         if IS_MACOS:
-            # Setup keyboard handler for macOS using pynput
             self.keyboard_listener = keyboard.Listener(
                 on_press=self._handle_key_press,
                 on_release=self._handle_key_release
@@ -122,13 +121,16 @@ class VoiceInteractionSession:
             except Exception as e:
                 self.button = None
                 logging.warning(f'Failed to initialize GPIO button: {e}. Continuing with keyboard input only.')
+        
+        # WebSocket and session state
         self.jwt_token = os.getenv('JWT_TOKEN')
         if not self.jwt_token:
             raise ValueError("JWT_TOKEN environment variable not set")
-        
-        self.running = False
         self.websocket = None
         self.reconnect_delay = 1  # Initial reconnect delay in seconds
+        
+        # Thread control
+        self.running = True  # Controls keyboard thread
 
     async def connect_websocket(self):
         """Establish WebSocket connection with exponential backoff"""
@@ -738,22 +740,18 @@ class VoiceInteractionSession:
             while self.running:
                 if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
                     char = sys.stdin.read(1)
-                    logging.info(f'Key detected: {repr(char)}')
                     if char == ' ':
-                        logging.info('Spacebar pressed - triggering handler')
-                        self.loop.call_soon_threadsafe(
-                            lambda: self.loop.create_task(self._handle_space_press())
-                        )
+                        logging.info('Spacebar pressed')
+                        self._handle_input_press()
+                        self._handle_input_release()
                     elif char.lower() == 'q':
-                        logging.info('Q pressed - triggering handler')
-                        self.loop.call_soon_threadsafe(
-                            lambda: self.loop.create_task(self._handle_q_press())
-                        )
+                        logging.info('Q pressed - stopping...')
+                        self.running = False
+                        break
         except Exception as e:
             logging.error(f'Error in keyboard thread: {e}')
         finally:
             logging.info('Keyboard thread stopping - restoring terminal settings')
-            # Restore terminal settings
             if hasattr(self, 'old_terminal_settings'):
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_terminal_settings)
 
