@@ -15,11 +15,17 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
+import threading
+
 # Platform-specific imports
 IS_MACOS = platform.system() == 'Darwin'
-from pynput import keyboard
-if not IS_MACOS:
+if IS_MACOS:
+    from pynput import keyboard
+else:
     from gpiozero import Button
+    import select
+    import termios
+    import tty
 
 # Configure logging
 logging.basicConfig(
@@ -95,15 +101,25 @@ class VoiceInteractionSession:
         self.disconnect_event = None  # Event to signal when disconnect response is received
         self.pending_disconnect_id = None  # Track the request_id of a pending disconnect
         
-        # Setup keyboard handler for all platforms
-        self.keyboard_listener = keyboard.Listener(
-            on_press=self._handle_key_press,
-            on_release=self._handle_key_release
-        )
-        self.keyboard_listener.start()
-        logging.info('Initialized keyboard handler (using spacebar, press Q to quit)')
-        
-        if not IS_MACOS:
+        # Initialize keyboard handler
+        self.running = True
+        if IS_MACOS:
+            # Setup keyboard handler for macOS using pynput
+            self.keyboard_listener = keyboard.Listener(
+                on_press=self._handle_key_press,
+                on_release=self._handle_key_release
+            )
+            self.keyboard_listener.start()
+            logging.info('Initialized keyboard handler for macOS (using spacebar, press Q to quit)')
+        else:
+            # Setup keyboard handler for Raspberry Pi using stdin in a thread
+            self.old_terminal_settings = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+            self.keyboard_thread = threading.Thread(target=self._stdin_keyboard_thread)
+            self.keyboard_thread.daemon = True
+            self.keyboard_thread.start()
+            logging.info('Initialized keyboard handler for Raspberry Pi (using spacebar, press Q to quit)')
+            
             # Initialize GPIO button for Raspberry Pi
             try:
                 self.button = Button(button_pin, bounce_time=0.05)
@@ -722,18 +738,53 @@ class VoiceInteractionSession:
         if key == keyboard.Key.space:
             self._handle_input_release()
 
+    def _stdin_keyboard_thread(self):
+        """Background thread for keyboard input on Raspberry Pi"""
+        try:
+            while self.running:
+                if select.select([sys.stdin], [], [], 0.1)[0]:  # 0.1s timeout
+                    char = sys.stdin.read(1)
+                    if char == ' ':
+                        logging.info('Spacebar pressed')
+                        self.loop.call_soon_threadsafe(
+                            lambda: self.loop.create_task(self._handle_space_press())
+                        )
+                    elif char.lower() == 'q':
+                        logging.info('Q pressed - stopping...')
+                        self.loop.call_soon_threadsafe(
+                            lambda: self.loop.create_task(self._handle_q_press())
+                        )
+        except Exception as e:
+            logging.error(f'Error in keyboard thread: {e}')
+        finally:
+            # Restore terminal settings
+            if hasattr(self, 'old_terminal_settings'):
+                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_terminal_settings)
+
+    async def _handle_space_press(self):
+        """Handle spacebar press in the main event loop"""
+        self._handle_input_press()
+        await asyncio.sleep(0.1)  # Small delay to prevent double-triggers
+        self._handle_input_release()
+
+    async def _handle_q_press(self):
+        """Handle Q press in the main event loop"""
+        await self.stop_session()
+        self.running = False
+        self.loop.stop()
+
 async def main():
     """Main entry point for the voice interaction application"""
     try:
+        global session
         session = VoiceInteractionSession(button_pin=17)
         input_type = 'spacebar (press Q to quit)' + (' or GPIO button' if not IS_MACOS else '')
         logging.info(f'Voice Interaction Service started. Waiting for {input_type} press...')
         
         # Keep the application running until interrupted
         try:
-            # Create a future that we can cancel later
-            main_future = asyncio.get_event_loop().create_future()
-            await main_future  # Run forever until interrupted or cancelled
+            # Both macOS and Raspberry Pi use background threads now
+            await asyncio.get_event_loop().create_future()
         except asyncio.CancelledError:
             logging.info('Main task cancelled')
             
