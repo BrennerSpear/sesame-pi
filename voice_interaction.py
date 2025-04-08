@@ -12,11 +12,11 @@ from functools import partial
 import pyaudio
 import numpy as np
 from dotenv import load_dotenv
+import threading
 
 # Load environment variables
 load_dotenv()
 
-import threading
 
 # Platform-specific imports
 IS_MACOS = platform.system() == 'Darwin'
@@ -34,7 +34,7 @@ class RaspberryPiFormatter(logging.Formatter):
         # Format the message
         msg = super().format(record)
         # Ensure proper line ending that works in raw terminal mode
-        return f'\r{msg}\n'
+        return f'\r{msg}'
 
 # Configure logging
 # logging.basicConfig(
@@ -74,11 +74,11 @@ console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 root_logger.addHandler(console_handler)
 
-# Load configuration from environment variables
-AUDIO_RATE = int(os.getenv('AUDIO_RATE', '16000'))
-CHUNK_SIZE = int(os.getenv('CHUNK_SIZE', '1024'))
-CLIENT_NAME = os.getenv('CLIENT_NAME', 'RP-Web')  # Changed from 'Sesame-Pi' to match working request
-CLIENT_TIMEZONE = os.getenv('CLIENT_TIMEZONE', 'America/New_York')
+# hardcode sesame configuration
+CLIENT_NAME="RP-Web"
+CLIENT_TIMEZONE="America/New_York"
+AUDIO_RATE=24000
+CHUNK_SIZE=4096
 
 # WebSocket configuration
 WS_URI = 'wss://sesameai.app/agent-service-0/v1/connect'
