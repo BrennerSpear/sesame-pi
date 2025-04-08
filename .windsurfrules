@@ -1,0 +1,1 @@
+The production version of this will run on a Raspberry Pi Zero. We test this on both a Mac OS and on a Raspberry Pi with a keyboard plugged in. We always need to make sure everything will work in both environments. We should always be having logic to separate out the two if something is working on one and needs to work differently on the other. 

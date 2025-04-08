@@ -28,16 +28,51 @@ else:
     import termios
     import tty
 
+# Custom logging formatter for Raspberry Pi that ensures proper line endings in raw terminal mode
+class RaspberryPiFormatter(logging.Formatter):
+    def format(self, record):
+        # Format the message
+        msg = super().format(record)
+        # Ensure proper line ending that works in raw terminal mode
+        return f'\r{msg}\n'
+
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
-    datefmt='%M:%S',
-    handlers=[
-        logging.FileHandler('session.log'),
-        logging.StreamHandler()  # This will print to console
-    ]
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+#     datefmt='%M:%S',
+#     handlers=[
+#         logging.FileHandler('session.log'),
+#         logging.StreamHandler()  # This will print to console
+#     ]
+# )
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+
+# Create the basic formatter for macOS
+basic_formatter = logging.Formatter(
+    fmt='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+    datefmt='%M:%S'
 )
+
+# Create the Raspberry Pi formatter for raw terminal mode
+pi_formatter = RaspberryPiFormatter(
+    fmt='%(asctime)s.%(msecs)03d %(levelname)s: %(message)s',
+    datefmt='%M:%S'
+)
+
+# Use the appropriate formatter based on platform
+formatter = pi_formatter if not IS_MACOS else basic_formatter
+
+# Set up handlers with the platform-specific formatter
+file_handler = logging.FileHandler('session.log')
+file_handler.setFormatter(formatter)
+root_logger.addHandler(file_handler)
+
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+root_logger.addHandler(console_handler)
 
 # Load configuration from environment variables
 AUDIO_RATE = int(os.getenv('AUDIO_RATE', '16000'))
