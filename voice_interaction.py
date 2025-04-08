@@ -741,22 +741,25 @@ class VoiceInteractionSession:
     def _stdin_keyboard_thread(self):
         """Background thread for keyboard input on Raspberry Pi"""
         try:
+            logging.info('Keyboard thread started')
             while self.running:
-                if select.select([sys.stdin], [], [], 0.1)[0]:  # 0.1s timeout
+                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
                     char = sys.stdin.read(1)
+                    logging.info(f'Key detected: {repr(char)}')
                     if char == ' ':
-                        logging.info('Spacebar pressed')
+                        logging.info('Spacebar pressed - triggering handler')
                         self.loop.call_soon_threadsafe(
                             lambda: self.loop.create_task(self._handle_space_press())
                         )
                     elif char.lower() == 'q':
-                        logging.info('Q pressed - stopping...')
+                        logging.info('Q pressed - triggering handler')
                         self.loop.call_soon_threadsafe(
                             lambda: self.loop.create_task(self._handle_q_press())
                         )
         except Exception as e:
             logging.error(f'Error in keyboard thread: {e}')
         finally:
+            logging.info('Keyboard thread stopping - restoring terminal settings')
             # Restore terminal settings
             if hasattr(self, 'old_terminal_settings'):
                 termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_terminal_settings)
