@@ -111,16 +111,9 @@ class VoiceInteractionSession:
             )
             self.keyboard_listener.start()
             logging.info('Initialized keyboard handler for macOS (using spacebar, press Q to quit)')
-        else:
-            # Setup keyboard handler for Raspberry Pi using stdin in a thread
-            self.old_terminal_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-            self.keyboard_thread = threading.Thread(target=self._stdin_keyboard_thread)
-            self.keyboard_thread.daemon = True
-            self.keyboard_thread.start()
-            logging.info('Initialized keyboard handler for Raspberry Pi (using spacebar, press Q to quit)')
             
-            # Initialize GPIO button for Raspberry Pi
+        # Initialize GPIO button for Raspberry Pi
+        if not IS_MACOS:
             try:
                 self.button = Button(button_pin, bounce_time=0.05)
                 self.button.when_pressed = self._handle_button_press
@@ -781,6 +774,16 @@ async def main():
     try:
         global session
         session = VoiceInteractionSession(button_pin=17)
+        
+        # Initialize keyboard input for Raspberry Pi after event loop is running
+        if not IS_MACOS:
+            session.old_terminal_settings = termios.tcgetattr(sys.stdin)
+            tty.setraw(sys.stdin.fileno())
+            session.keyboard_thread = threading.Thread(target=session._stdin_keyboard_thread)
+            session.keyboard_thread.daemon = True
+            session.keyboard_thread.start()
+            logging.info('Initialized keyboard handler for Raspberry Pi (using spacebar, press Q to quit)')
+        
         input_type = 'spacebar (press Q to quit)' + (' or GPIO button' if not IS_MACOS else '')
         logging.info(f'Voice Interaction Service started. Waiting for {input_type} press...')
         
