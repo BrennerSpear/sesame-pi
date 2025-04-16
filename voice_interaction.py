@@ -115,7 +115,7 @@ class WebSocketMessage:
         )
 
 class VoiceInteractionSession:
-    def __init__(self, button_pin=17):
+    def __init__(self):
         # Audio setup
         self.audio = pyaudio.PyAudio()
         self.input_stream = None
@@ -127,7 +127,6 @@ class VoiceInteractionSession:
         self.session_id = None
         self.call_id = None
         self.sample_rate = None
-        self.press_time = None
         self.loop = asyncio.get_event_loop()
         self.session_active = False  # Track if a session is currently active
         self.ping_received = False  # Track if we've received a ping response
@@ -137,25 +136,9 @@ class VoiceInteractionSession:
         self.disconnect_event = None  # Event to signal when disconnect response is received
         self.pending_disconnect_id = None  # Track the request_id of a pending disconnect
         
-        # Initialize keyboard handler for macOS
-        if IS_MACOS:
-            self.keyboard_listener = keyboard.Listener(
-                on_press=self._handle_key_press,
-                on_release=self._handle_key_release
-            )
-            self.keyboard_listener.start()
-            logging.info('Initialized keyboard handler for macOS (using spacebar, press Q to quit)')
-            
-        # Initialize GPIO button for Raspberry Pi
-        if not IS_MACOS:
-            try:
-                self.button = Button(button_pin, bounce_time=0.05)
-                self.button.when_pressed = self._handle_button_press
-                self.button.when_released = self._handle_button_release
-                logging.info(f'Initialized GPIO button on pin {button_pin}')
-            except Exception as e:
-                self.button = None
-                logging.warning(f'Failed to initialize GPIO button: {e}. Continuing with keyboard input only.')
+        # Add signal handler for clean shutdown
+        import signal
+        signal.signal(signal.SIGTERM, self._handle_sigterm)
         
         # WebSocket and session state
         self.jwt_token = os.getenv('JWT_TOKEN')
@@ -688,141 +671,29 @@ class VoiceInteractionSession:
         self._cleanup_audio_streams()
         logging.info('Session Terminated')
 
-    def _handle_input_press(self):
-        """Handle input press event (button or keyboard)"""
-        self.press_time = datetime.now()
-        logging.info('Input pressed')
-
-    def _handle_input_release(self):
-        """Handle input release event and determine if it was a short or long press"""
-        if not self.press_time:
-            return
-
-        release_time = datetime.now()
-        press_duration = (release_time - self.press_time).total_seconds()
-        self.press_time = None
-
-        if press_duration >= 2.0:
-            # Long press (>= 2 seconds) - stop session
-            if self.session_active:
-                logging.info('Long press detected - stopping session')
-                self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.stop_session()))
-        else:
-            # Short press - start session only if not already active
-            if not self.session_active:
-                logging.info('Short press detected - starting session')
-                self.loop.call_soon_threadsafe(lambda: self.loop.create_task(self.start_session()))
-            else:
-                logging.info('Session already active, ignoring short press')
-
-    def _handle_button_press(self):
-        """Handle Raspberry Pi GPIO button press"""
-        self._handle_input_press()
-
-    def _handle_button_release(self):
-        """Handle Raspberry Pi GPIO button release"""
-        self._handle_input_release()
-
-    def _handle_key_press(self, key):
-        """Handle macOS keyboard press"""
-        if key == keyboard.Key.space:
-            self._handle_input_press()
-        elif hasattr(key, 'char') and key.char == 'q':
-            logging.info('Q key pressed - terminating application')
-            
-            # Prevent multiple shutdown attempts
-            if self.shutting_down:
-                return
-                
-            # Create a graceful shutdown sequence
-            async def shutdown_sequence():
-                try:
-                    # Stop the session (which will disconnect the call)
-                    await self.stop_session()
-                    
-                    # Add a small delay to ensure session is fully stopped
-                    await asyncio.sleep(0.5)
-                    
-                    # Cancel all other tasks
-                    for task in asyncio.all_tasks(self.loop):
-                        if task is not asyncio.current_task():
-                            task.cancel()
-                    
-                    # Allow a moment for tasks to clean up
-                    await asyncio.sleep(0.5)
-                    
-                    # Stop the loop
-                    self.loop.stop()
-                except Exception as e:
-                    logging.info(f'Non-critical error in shutdown sequence: {e}')
-                    # Ensure the loop stops even if there's an error
-                    self.loop.stop()
-            
-            # Schedule the shutdown sequence
-            self.loop.call_soon_threadsafe(
-                lambda: self.loop.create_task(shutdown_sequence())
-            )
-
-    def _handle_key_release(self, key):
-        """Handle macOS keyboard release"""
-        if key == keyboard.Key.space:
-            self._handle_input_release()
-
-    def _stdin_keyboard_thread(self):
-        """Background thread for keyboard input on Raspberry Pi"""
-        try:
-            logging.info('Keyboard thread started')
-            while self.running:
-                if select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], []):
-                    char = sys.stdin.read(1)
-                    if char == ' ':
-                        logging.info('Spacebar pressed')
-                        self._handle_input_press()
-                        self._handle_input_release()
-                    elif char.lower() == 'q':
-                        logging.info('Q pressed - stopping...')
-                        self.running = False
-                        break
-        except Exception as e:
-            logging.error(f'Error in keyboard thread: {e}')
-        finally:
-            logging.info('Keyboard thread stopping - restoring terminal settings')
-            if hasattr(self, 'old_terminal_settings'):
-                termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_terminal_settings)
-
-    async def _handle_space_press(self):
-        """Handle spacebar press in the main event loop"""
-        self._handle_input_press()
-        await asyncio.sleep(0.1)  # Small delay to prevent double-triggers
-        self._handle_input_release()
-
-    async def _handle_q_press(self):
-        """Handle Q press in the main event loop"""
-        await self.stop_session()
+    def _handle_sigterm(self, signum, frame):
+        """Handle SIGTERM signal for clean shutdown"""
+        logging.info('Received SIGTERM signal, shutting down...')
         self.running = False
-        self.loop.stop()
+        self.shutting_down = True
+        # Schedule shutdown in the event loop
+        self.loop.call_soon_threadsafe(
+            lambda: self.loop.create_task(self.stop_session())
+        )
 
 async def main():
     """Main entry point for the voice interaction application"""
     try:
         global session
-        session = VoiceInteractionSession(button_pin=17)
+        session = VoiceInteractionSession()
         
-        # Initialize keyboard input for Raspberry Pi after event loop is running
-        if not IS_MACOS:
-            session.old_terminal_settings = termios.tcgetattr(sys.stdin)
-            tty.setraw(sys.stdin.fileno())
-            session.keyboard_thread = threading.Thread(target=session._stdin_keyboard_thread)
-            session.keyboard_thread.daemon = True
-            session.keyboard_thread.start()
-            logging.info('Initialized keyboard handler for Raspberry Pi (using spacebar, press Q to quit)')
+        logging.info('Voice Interaction Service started. Auto-connecting...')
         
-        input_type = 'spacebar (press Q to quit)' + (' or GPIO button' if not IS_MACOS else '')
-        logging.info(f'Voice Interaction Service started. Waiting for {input_type} press...')
+        # Auto-start session
+        await session.start_session()
         
         # Keep the application running until interrupted
         try:
-            # Both macOS and Raspberry Pi use background threads now
             await asyncio.get_event_loop().create_future()
         except asyncio.CancelledError:
             logging.info('Main task cancelled')

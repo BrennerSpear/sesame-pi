@@ -1,0 +1,17 @@
+[Unit]
+Description=Sesame Button Service
+After=multi-user.target network.target
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/sesame-pi
+ExecStart=/usr/bin/python3 /home/pi/sesame-pi/sesame_button_service.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
