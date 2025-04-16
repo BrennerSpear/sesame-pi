@@ -21,7 +21,7 @@ This is a simplified version of the Sesame button service that uses an event-bas
 ## Files Included
 
 1. `simple_button_test.py` - A very basic button test that just prints when the button is pressed or released
-2. `simple_triple_click_test.py` - A test for triple-click detection using the event-based approach
+2. `test_triple_click.py` - A test for triple-click detection using the event-based approach
 3. `simplified_button_service.py` - The simplified button service with triple-click detection and process management
 4. `simplified-button.service` - A systemd service file for the simplified button service
 
@@ -42,10 +42,10 @@ This will print a message when the button is pressed or released.
 To test the triple-click detection:
 
 ```bash
-python3 simple_triple_click_test.py
+python3 test_triple_click.py
 ```
 
-This will detect when you press the button three times in quick succession (within 1.0 second) and print a message.
+This will detect when you press the button three times in quick succession (within 0.5 seconds) and print a message.
 
 ### Simplified Button Service
 
@@ -98,15 +98,19 @@ sudo systemctl start simplified-button.service
 
 Connect a momentary push button between GPIO pin 19 and ground (GND) on your Raspberry Pi. The button service uses the internal pull-up resistor, so no external resistor is needed.
 
-## Improvements to Triple-Click Detection
+## Triple-Click Detection Implementation
 
-The triple-click detection has been improved in the following ways:
+The triple-click detection works as follows:
 
-1. **Increased Timeout**: The timeout between clicks has been increased from 0.5 seconds to 1.0 second, making it easier to perform a triple-click.
+1. **Click Timeout**: The timeout between clicks is set to 0.5 seconds to count as part of a triple-click sequence.
 
-2. **Separated Concerns**: The button release handler now checks if we're in the middle of a potential triple-click sequence before starting the Sesame process. This prevents the process start operation from interfering with triple-click detection.
+2. **Pause After Triple-Click**: After a triple-click is detected and Sesame is stopped, the system pauses for 2 seconds to prevent accidental immediate restart.
 
-3. **Better Cleanup**: All scripts now include proper cleanup when exited with Ctrl+C, ensuring that any running processes are stopped and temporary files are removed.
+3. **Click Handling**: When a button press is detected, the click count is incremented. If it reaches 3, Sesame is stopped (if running). If not, a timer is started to reset the count after the timeout.
+
+4. **Single-Click Action**: If only a single click is detected (and the timeout expires), Sesame is started if it's not already running.
+
+5. **Proper Cleanup**: The script includes proper cleanup when exited with Ctrl+C, ensuring that any running processes are stopped and temporary files are removed.
 
 ## Advantages of the Simplified Approach
 
