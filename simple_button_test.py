@@ -21,4 +21,11 @@ button.when_released = on_release
 
 print("Listening for button on GPIO 19...")
 print("Press Ctrl+C to exit")
-pause()  # Keeps the program running
+
+# Keep the script running using signal.pause()
+try:
+    pause()  # Keeps the program running
+except KeyboardInterrupt:
+    print("Button test stopped by user")
+finally:
+    print("Button test complete")

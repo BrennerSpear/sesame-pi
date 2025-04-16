@@ -21,21 +21,29 @@ TRIPLE_CLICK_TIMEOUT = 0.5  # seconds between clicks to count as triple click
 # File to store the PID of the running Sesame process
 SESAME_PID_FILE = "/tmp/sesame_ws.pid"
 # Path to the voice interaction script
+# SESAME_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_microphone.py")
 SESAME_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "voice_interaction.py")
 # Python interpreter path (use venv if available)
 VENV_PYTHON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "venv/bin/python")
 PYTHON_PATH = VENV_PYTHON if os.path.exists(VENV_PYTHON) else "/usr/bin/python3"
 
 class TripleClickDetector:
-    def __init__(self, callback, timeout=TRIPLE_CLICK_TIMEOUT):
-        self.callback = callback
+    def __init__(self, timeout=TRIPLE_CLICK_TIMEOUT):
         self.timeout = timeout
         self.click_count = 0
         self.timer = None
         self.lock = threading.Lock()
+        self.paused = False
+        self.pause_timer = None
+        self.pause_duration = 2.0  # 2 second pause after triple click
+        self.just_stopped = False  # Track if we just stopped Sesame
     
     def on_click(self):
         with self.lock:
+            if self.paused:
+                print("Input ignored - system paused after triple click")
+                return
+                
             # Cancel any existing timer
             if self.timer:
                 self.timer.cancel()
@@ -44,21 +52,42 @@ class TripleClickDetector:
             self.click_count += 1
             print(f"Click detected! Count: {self.click_count}")
             
-            # If we've reached 3 clicks, execute callback
+            # If we've reached 3 clicks, stop Sesame
             if self.click_count == 3:
-                self.callback()
+                print("Triple click detected")
+                if is_sesame_running():
+                    stop_sesame()
                 self.click_count = 0
+                self.paused = True
+                self.just_stopped = True  # Mark that we just stopped Sesame
+                if self.timer:
+                    self.timer.cancel()
+                    self.timer = None
+                print(f"System paused for {self.pause_duration} seconds")
+                self.pause_timer = threading.Timer(self.pause_duration, self.resume_input)
+                self.pause_timer.daemon = True
+                self.pause_timer.start()
             else:
-                # Start timer to reset click count after timeout
+                # Start timer to reset click count and handle single click after timeout
                 self.timer = threading.Timer(self.timeout, self.reset_count)
                 self.timer.daemon = True
                 self.timer.start()
     
     def reset_count(self):
         with self.lock:
+            # If it was a single click and we're not in a special state, start Sesame
+            if self.click_count == 1 and not self.paused and not self.just_stopped:
+                if not is_sesame_running():
+                    start_sesame()
             print(f"Timeout reached. Resetting click count from {self.click_count} to 0")
             self.click_count = 0
             self.timer = None
+    
+    def resume_input(self):
+        with self.lock:
+            self.paused = False
+            self.just_stopped = False
+            print("System resumed - ready for input")
 
 def is_sesame_running():
     """Check if the Sesame process is running"""
@@ -135,26 +164,14 @@ def stop_sesame():
         if os.path.exists(SESAME_PID_FILE):
             os.remove(SESAME_PID_FILE)
 
-def handle_button_press():
-    """Handle button press - start Sesame if not running"""
-    if not is_sesame_running():
-        start_sesame()
-
-def handle_triple_click():
-    """Handle triple click - stop Sesame if running"""
-    print("Triple click detected")
-    if is_sesame_running():
-        stop_sesame()
-
 # Initialize triple click detector
-triple_click_detector = TripleClickDetector(handle_triple_click)
+triple_click_detector = TripleClickDetector()
 
 # Initialize button
-button = Button(BUTTON_PIN, bounce_time=0.1, pull_up=True)
+button = Button(BUTTON_PIN, bounce_time=0.05, pull_up=True)
 
-# Set up button handlers
+# Set up button handler
 button.when_pressed = lambda: triple_click_detector.on_click()
-button.when_released = handle_button_press
 
 print(f"Button service started. Monitoring button on GPIO {BUTTON_PIN}.")
 print("Single press: Start Sesame if not running")
@@ -171,3 +188,17 @@ except Exception as e:
     raise
 finally:
     print("Button service shutting down")
+    # Ensure the Sesame voice interaction is stopped
+    if is_sesame_running():
+        print("Cleaning up: Stopping Sesame voice interaction...")
+        stop_sesame()
+    
+    # Double-check that the PID file is removed
+    if os.path.exists(SESAME_PID_FILE):
+        print(f"Cleaning up: Removing PID file {SESAME_PID_FILE}")
+        try:
+            os.remove(SESAME_PID_FILE)
+        except Exception as e:
+            print(f"Error removing PID file: {e}")
+    
+    print("Cleanup complete")

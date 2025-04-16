@@ -16,6 +16,7 @@ This is a simplified version of the Sesame button service that uses an event-bas
 - Uses simple print statements instead of logging
 - Can still run as a systemd service
 - Has basic error handling
+- Includes proper cleanup when exiting with Ctrl+C (stops voice interaction process and removes PID file)
 
 ## Files Included
 
@@ -44,7 +45,7 @@ To test the triple-click detection:
 python3 simple_triple_click_test.py
 ```
 
-This will detect when you press the button three times in quick succession (within 0.5 seconds) and print a message.
+This will detect when you press the button three times in quick succession (within 1.0 second) and print a message.
 
 ### Simplified Button Service
 
@@ -57,6 +58,7 @@ python3 simplified_button_service.py
 This will:
 - Start the Sesame voice interaction when the button is pressed (if it's not already running)
 - Stop the Sesame voice interaction when the button is triple-clicked (if it's running)
+- Properly clean up when exited with Ctrl+C (stops any running voice interaction process and removes PID file)
 
 ## Installation as a Service
 
@@ -95,6 +97,16 @@ sudo systemctl start simplified-button.service
 ## Hardware Setup
 
 Connect a momentary push button between GPIO pin 19 and ground (GND) on your Raspberry Pi. The button service uses the internal pull-up resistor, so no external resistor is needed.
+
+## Improvements to Triple-Click Detection
+
+The triple-click detection has been improved in the following ways:
+
+1. **Increased Timeout**: The timeout between clicks has been increased from 0.5 seconds to 1.0 second, making it easier to perform a triple-click.
+
+2. **Separated Concerns**: The button release handler now checks if we're in the middle of a potential triple-click sequence before starting the Sesame process. This prevents the process start operation from interfering with triple-click detection.
+
+3. **Better Cleanup**: All scripts now include proper cleanup when exited with Ctrl+C, ensuring that any running processes are stopped and temporary files are removed.
 
 ## Advantages of the Simplified Approach
 
